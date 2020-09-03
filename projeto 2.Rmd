@@ -1,0 +1,321 @@
+---
+title: "Comparação da popularidade de gêneros de séries e filmes na Netflix"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+O objetivo desse trabalho é procurar padrôes e tendências para o consumo de entretenimento de usuários da Netflix. Como os dados fornecidos pela empresa são muito limitados, são tomados caminhos alternativos para quantificar o que entra e sai de moda. Ademais, busca-se verificar o quão a risca está sendo seguido o adágio 'quality over quantity', verificando a qualidade média de gêneros em comparação com a quantidade de conteúdo produzida.
+
+# Pacotes utilizados
+Parte dos pacotes utilizados é os pacotes básicos para visualização de dados (tidyr, dplyr e ggplot2). A utilização de outros será comentada no código quando surgir.
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(scales)
+library(plotly)
+```
+
+# Dados utilizados
+Os dados são do catálogo da Netflix (vindos de um dataset do Kaggle) e da base de dados do IMDb (extraídos diretamente do site deles). Como esse segundo dataset é muito grande, gerei um novo dataset, contendo apenas os filmes e séries que pertencem ao catálogo da Netflix (que são aqueles que serão analisados), para que o código rode mais eficientemente. O chunk abaixo não é rodado, e está aqui apenas para mostrar como foi feita a transformação.
+
+```{r, eval = FALSE}
+netflix <- read.csv('netflix_titles.csv')
+
+imdb <- read.table('imdb_titles.tsv',                            #dados de filmes e séries do imdb
+                     sep = '\t', fill = TRUE, header = TRUE)
+notas <- read.table('ratings.tsv',                          #notas disponíveis (estão em um arquivo separado); 
+                     sep = '\t', fill = TRUE, header = TRUE)
+imdbcompleto <- merge(imdb, notas, by.x='tconst', by.y='tconst')  #juntando os dois para titulos correspondentes
+
+dados <- merge(imdbcompleto, netflix, by.x='primaryTitle', by.y='title')%>%  #verificando os titulos da netflix 
+          select(-tconst, -endYear, -genres, -show_id,                   #que possuem nota do imdb
+                 -originalTitle, -isAdult, -runtimeMinutes, -titleType)  #e removendo colunas que nao utilizarei
+write.csv(dados, file ='dados.csv')
+```
+
+# Análise da popularidade de gêneros ao longo do tempo
+A partir dos dados, irei extrair os gêneros de cada filme e série adicionados ao catálogo da Netflix. Como os dados sobre o consumo dos usuários da Netflix não são públicos, utilizarei como proxy a quantidade adicionada diariamente de cada gênero, tomando como hipótese que a Netflix adiciona mais conteúdo de um gênero de acordo com o perfil de seus consumidores atuais e previstos. Note que não será feita distinção entre filmes e séries, e certas colunas geradas no dataframe de gêneros não serão utilizadas, tanto por serem redundantes como por terem sido adulteradas devido à metodologia utilizada (mais detalhes no código).
+
+```{r message=FALSE, warning=FALSE}
+netflix <- read.csv('netflix_titles.csv', stringsAsFactors = FALSE) #lendo os dados com strings (evita um bug futuro)
+
+generos <- c(unique((unlist(strsplit(netflix$listed_in, ','))))) #encontrando todos os gêneros listados
+
+remove <- c(' Romantic TV Shows', ' Docuseries', ' International TV Shows', " TV Dramas",
+           " Dramas", " International Movies", " Independent Movies" , " Thrillers",
+           " TV Sci-Fi & Fantasy", " Romantic Movies", " Sci-Fi & Fantasy", " Comedies",
+           " Cult Movies", " TV Action & Adventure", " TV Comedies", " Reality TV",
+           " Horror Movies", " TV Horror", " Classic Movies", " Kids' TV", " Crime TV Shows",
+           " Documentaries", " Children & Family Movies", " Stand-Up Comedy & Talk Shows",
+           " Anime Features", " Classic & Cult TV", " Stand-Up Comedy", " Spanish-Language TV Shows",
+           " Sports Movies", " Music & Musicals")
+
+generosgraph <- setdiff(generos, remove)  #removendo manualmente alguns gêneros repetidos para usar no gráfico
+
+listagen <- data.frame(matrix(nrow=6234, ncol=43)) 
+#gerando o dataframe que conterá para cada gênero dias onde foram adicionados itens
+colnames(listagen)=c('title', generosgraph)
+#dando nomes aos bois
+listagen$title = netflix$title
+#e aos filmes também
+
+for (j in 1:42){
+  for (i in 1:6234){
+    if (grepl(generosgraph[j], netflix$listed_in[[i]], fixed = TRUE)==TRUE){
+      listagen[i,j+1]<-netflix$date_added[[i]]
+    }
+  }
+}
+#aqui começam os truques. Como filmes podem ter números diferentes de gêneros, e não dá pra discernir qual 
+#deles é mais importante, ou uso o group_by e gero mais de 300 gêneros (que são combinações de gêneros), ou
+#tomo apenas o primeiro gênero de cada filme. A solução que encontrei foi não usar o group_by (daí a necessi-
+#dade do dataframe auxiliar), e verificar se o gênero pertence à string listed_in de cada filme. Os gêneros
+#redundantes vêm do fato de (coisa) estar contido em ( coisa), logo o teste do grepl (que se assemelha a um
+# %in%) elimina certos gêneros e diminui a quantidade de dados. O efeito colateral desse método é a super--
+#representação de alguns gêneros, como Movies e TV Shows, porém não utilizarei eles pois são muito genéricos,
+#logo a superpopulação de suas colunas não afeta a análise quantitativa feita aqui.
+
+Sys.setlocale("LC_ALL","English") #magia. Isso permite converter a string de data em formato data.
+
+listagen[-1] <- lapply(listagen[-1], strptime, format = "%B %e, %Y") #transformando as datas em date.
+
+listagen$Romance <- coalesce(listagen$`Romantic Movies`, listagen$`Romantic TV Shows`)
+listagen$Comedy <- coalesce(listagen$Comedies, listagen$`Stand-Up Comedy & Talk Shows`, listagen$`TV Comedies`)
+listagen$'Action&Adventure' <- coalesce(listagen$`Action & Adventure`, listagen$`TV Action & Adventure`)
+listagen$Horror <- coalesce(listagen$'Horror Movies', listagen$`TV Horror`)
+listagen$Thriller <- coalesce(listagen$' TV Thrillers', listagen$Thrillers, listagen$` TV Mysteries`)
+listagen$'Sci-Fi' <- coalesce(listagen$`Sci-Fi & Fantasy`, listagen$`TV Sci-Fi & Fantasy`)
+
+#gerando colunas que agregam gêneros que não são agregados pelo código inicial, para evitar que gêneros como
+#drama englobem TV e cinema enquanto gêneros como romance não.
+
+```
+
+### Gráfico da variação do catálogo de gêneros
+Para esse gráfico, tomarei alguns gêneros como principais. Tais gêneros serão Comedies, Children & Family Movies, Docuseries, Action & Adventure, Thrillers, Dramas e Romantic Movies. Note que alguns deles englobarão tanto filmes e séries, enquanto outros apenas filmes ou séries.
+
+```{r message=FALSE, warning=FALSE}
+ChildFam <- table(cut(listagen$`Children & Family Movies`, 'day'))       #organizando por dia para 
+Com <- table(cut(listagen$`Comedy`, 'day'))                            #cada gênero analisado
+Docu <- table(cut(listagen$Docuseries, 'day'))            
+Acti <- table(cut(listagen$`Action&Adventure`, 'day'))
+Thri <- table(cut(listagen$Thriller, 'day'))
+Drama <- table(cut(listagen$Dramas, 'day'))
+Roma <- table(cut(listagen$`Romance`, 'day'))
+
+tempo <- Drama          #tomando o maior span de tempo possível
+
+agregado <- data.frame(Date=format(as.Date(names(Drama)), '%Y/%m/%d'),
+                       'Children & Family Movies'=c(integer(length(tempo)-length(ChildFam)), as.vector(ChildFam)),
+                       'Comedies'=c(integer(length(tempo)-length(Com)), as.vector(Com)),
+                       'Docuseries'=c(integer(length(tempo)-length(Docu)), as.vector(Docu)),
+                       'Action & Adventure'=c(integer(length(tempo)-length(Acti)), as.vector(Acti)),
+                       'Thrillers'=c(integer(length(tempo)-length(Thri)), as.vector(Thri)),
+                       'Dramas'=as.vector(Drama),
+                       'Romance'=c(integer(length(tempo)-length(Roma)), as.vector(Roma))
+)
+mean <- rowMeans(agregado[,-1])
+agregado[,-1] <-agregado[,-1]-mean
+
+#gerando um dataframe com a quantidade mensal para cada gênero, subtráida da quantidade geral.
+#A subtração é para corrigir o efeito de escala ao longo do tempo (isto é, todos os gêneros
+#observam um aumento, mas alguns aumentam mais do que outros).
+
+agregado <- melt(agregado, id.vars='Date', variable.name = 'Genre')
+#organizando em uma coluna com grupos para plotar
+
+ggplot(agregado, aes(as.Date(Date),value, group = Genre)) + 
+  geom_smooth(aes(colour = Genre), se=FALSE, na.rm = TRUE)+
+  ggtitle('Genre presence in Netflix catalogue over time')+
+  scale_x_date(labels = date_format("%Y"), limits = as.Date(c('2010-01-01','2020-01-01')),
+                 date_breaks = '1 year')+
+  xlab('')+ylab('Daily additions over average')
+
+```
+
+A análise acima aparenta mostrar um claro sucesso de dramas, porém, devo notar que esse gênero tem, no geral, custos menores do que outros, como ação ou ficção científica. Com isso, irei gerar 2 gráficos novos, separando (arbitrariamente) os gêneros entre baixo e alto orçamento.
+
+```{r message=FALSE, warning=FALSE}
+#essa seção usa código equivalente ao da seção acima, então não terá explicação
+
+#gêneros de baixo orçamento
+Cult <- table(cut(listagen$`Cult Movies`, 'day'))
+Faith <- table(cut(listagen$` Faith & Spirituality`, 'day'))
+Ind <- table(cut(listagen$`Independent Movies`, 'day'))
+Real <- table(cut(listagen$`Reality TV`, 'day'))
+Crime <- table(cut(listagen$`Crime TV Shows`, 'day'))
+Class <- table(cut(listagen$`Classic Movies`, 'day')) #esse último adiciono aqui considerando que os direitos de imagem não são caros
+
+agregadobaixo <- data.frame(Date=format(as.Date(names(Drama)), '%Y/%m/%d'),
+                            'Children & Family Movies'=c(integer(length(tempo)-length(ChildFam)), as.vector(ChildFam)),
+                            'Comedies'=c(integer(length(tempo)-length(Com)), as.vector(Com)),
+                            'Dramas'=as.vector(Drama),
+                            'Romance'=c(integer(length(tempo)-length(Roma)), as.vector(Roma)),
+                            'Crime TV Shows'=c(integer(length(tempo)-length(Crime)), as.vector(Crime)),
+                            'Cult Movies'=c(integer(length(tempo)-length(Cult)), as.vector(Cult)),
+                            'Faith & Spirituality'= c(integer(length(tempo)-length(Faith)), as.vector(Faith)),
+                            'Docuseries'=c(integer(length(tempo)-length(Docu)), as.vector(Docu)),
+                            'Reality TV'=c(integer(length(tempo)-length(Real)), as.vector(Real)),
+                            'Classic Movies'=c(integer(length(tempo)-length(Class)), as.vector(Class)))
+
+meanbaixo <- rowMeans(agregadobaixo[,-1])
+agregadobaixo[,-1] <-agregadobaixo[,-1]-meanbaixo
+
+agregadobaixo <- melt(agregadobaixo, id.vars='Date', variable.name = 'Genre')
+
+Science <- table(cut(listagen$` Science & Nature TV`, 'day'))
+Horr <- table(cut(listagen$`Horror`, 'day'))
+sci <- table(cut(listagen$`Sci-Fi`, 'day'))
+Mus <- table(cut(listagen$`Music & Musicals`, 'day'))
+
+#gêneros de alto orçamento
+
+agregadoalto <- data.frame(Date=format(as.Date(names(Drama)), '%Y/%m/%d'),
+                           'Action & Adventure'=c(integer(length(tempo)-length(Acti)), as.vector(Acti)),
+                           'Science & Nature'=c(integer(length(tempo)-length(Science)), as.vector(Science)),
+                           'Horror'=c(integer(length(tempo)-length(Horr)), as.vector(Horr)),
+                           'Sci-Fi'=c(integer(length(tempo)-length(sci)), as.vector(sci)),
+                           'Musicals'=c(integer(length(tempo)-length(Mus)), as.vector(Mus)),
+                           'Thrillers'=c(integer(length(tempo)-length(Thri)), as.vector(Thri)))
+
+meanalto <- rowMeans(agregadoalto[,-1])
+agregadoalto[,-1] <-agregadoalto[,-1]-meanalto
+
+agregadoalto <- melt(agregadoalto, id.vars='Date', variable.name = 'Genre')
+
+#plots
+
+ggplot(agregadobaixo, aes(as.Date(Date),value, group = Genre)) + 
+  geom_smooth(aes(colour = Genre), se=FALSE, na.rm = TRUE)+
+  ggtitle('Low budget genres in Netflix catalogue over time')+
+  scale_x_date(labels = date_format("%Y"), limits = as.Date(c('2010-01-01','2020-01-01')),
+                 date_breaks = '1 year')+
+  xlab('')+ylab('Daily additions over average')
+
+ggplot(agregadoalto, aes(as.Date(Date),value, group = Genre)) + 
+  geom_smooth(aes(colour = Genre), se=FALSE, na.rm = TRUE)+
+  ggtitle('High budget genres in Netflix catalogue over time')+
+  scale_x_date(labels = date_format("%Y"), limits = as.Date(c('2010-01-01','2020-01-01')),
+                 date_breaks = '1 year')+
+  xlab('')+ylab('Daily additions over average')
+
+```
+
+Realizando a comparação separadamente, vemos que romances, que estavam abaixo da média geral, estão acima da média dentre gêneros de orçamento semelhante, indicando certa popularidade. Ainda assim, a tendência é clara de preferência por dramas e comédias. Dentre os gêneros de orçamento alto, vemos maior popularidade para os filmes de ação e aventura, e para filmes de terror (noto aqui a grande  expansão de filmes de terror em relação a filmes de horror). O valor baixo para conteúdo de ciência e natureza é esperado, por ser de nicho. Por outro lado, vemos um declínio ao longo do tempo de conteúdo de ficção científica.
+
+# Analisando a variação na qualidade dos lançamentos
+
+Verificamos a variação na quantidade, então surge a dúvida, os gêneros com maior quantidade apresentam menor qualidade média ao longo do tempo? Para verificar a validade dessa afirmação, vou cruzar os dados da Netflix com os dados disponibilizados pelo IMDb (note que há perda considerável do número de títulos, dado que o IMDb não disponibiliza boa parte das notas), de modo a ter a avaliação dos títulos do catálogo.
+
+```{r message=FALSE, warning=FALSE}
+dados <- read.csv('dados.csv', stringsAsFactors = FALSE) #usando esse segundo termo para trabalhar com strsplit
+
+notas <- subset(listagen, title %in% dados$primaryTitle)
+notas$rating <- NA
+
+#encontrando os títulos da netflix que possuem nota e gerando coluna vazia para as notas
+
+for (i in 1:2301){
+  if (notas$title[i] %in% dados$primaryTitle == TRUE){
+    notas$rating[i]=dados$averageRating[which(dados$primaryTitle==notas$title[i])]
+  }
+}
+
+#pegando as notas dos títulos e colocando no dataframe de gêneros
+
+Dramarating <- data.frame(notas$Dramas,notas$rating) %>% na.omit
+colnames(Dramarating)=c('date','rating') 
+Dramarating <- Dramarating %>% group_by(date) %>% summarise(Dramas = mean(rating))
+
+Docurating <- data.frame(notas$Docuseries,notas$rating) %>% na.omit 
+colnames(Docurating)=c('date','rating')
+Docurating <- Docurating %>% group_by(date) %>% summarise(Docuseries = mean(rating))
+
+Childrating <- data.frame(notas$`Children & Family Movies`,notas$rating) %>% na.omit
+colnames(Childrating)=c('date','rating') 
+Childrating <- Childrating %>% group_by(date) %>% summarise('Children & Family Movies' = mean(rating))
+
+Actionrating <- data.frame(notas$`Action&Adventure`,notas$rating) %>% na.omit
+colnames(Actionrating)=c('date','rating') 
+Actionrating <- Actionrating %>% group_by(date) %>% summarise('Action & Adventure' = mean(rating))
+
+Thrirating <- data.frame(notas$Thriller,notas$rating) %>% na.omit
+colnames(Thrirating)=c('date','rating') 
+Thrirating <- Thrirating %>% group_by(date) %>% summarise('Thrillers' = mean(rating))
+
+Comrating <- data.frame(notas$Comedy,notas$rating) %>% na.omit
+colnames(Comrating)=c('date','rating') 
+Comrating <- Comrating %>% group_by(date) %>% summarise(Comedies = mean(rating))
+
+Romrating <- data.frame(notas$Romance,notas$rating) %>% na.omit
+colnames(Romrating)=c('date','rating') 
+Romrating <- Romrating %>% group_by(date) %>% summarise(Romances = mean(rating))
+
+#gerando dataframes da média das adições de cada gênero por dia
+
+crossnotas <- merge(Dramarating, Docurating, by= 'date', all = T) %>%
+    merge(Childrating, all = T) %>%
+    merge(Actionrating, all = T) %>%
+    merge(Thrirating, all = T) %>%
+    merge(Comrating, all = T) %>%
+    merge(Romrating, all = T) %>%
+    melt(id.vars='date', variable.name='Genre')
+
+#gerando data.frame combinado e usando melt para plotar
+
+ggplot(crossnotas, aes(as.Date(date),value, group = Genre)) + 
+  geom_smooth(aes(colour = Genre), se=FALSE, na.rm = TRUE)+
+  ggtitle('Average IMDb rating of newly-added Netflix titles')+
+  scale_x_date(labels = date_format("%Y"), limits = as.Date(c('2010-01-01','2020-01-01')),
+               date_breaks = '1 year')+
+  xlab('')+ylab('Rating')
+
+notasnotempo <- ggplot(crossnotas, aes(as.Date(date),value, group = Genre)) + 
+  geom_smooth(aes(colour = Genre), se=TRUE, na.rm = TRUE)+
+  ggtitle('Average IMDb rating of newly-added Netflix titles')+
+  scale_x_date(labels = date_format("%Y"), limits = as.Date(c('2010-01-01','2020-01-01')),
+               date_breaks = '1 year')+
+  xlab('')+ylab('Rating')
+
+inter <- highlight_key(crossnotas, ~Genre )
+inter2 <- ggplotly(notasnotempo, tooltip = "Genre")
+
+highlight( inter2, on = "plotly_hover", off = "plotly_deselect", color = "red" )
+```
+
+No gráfico acima, basta clicar duas vezes em algum gênero para visualizar sua evolução, em conjunto com o intervalo de confiança da nota.
+
+Devo notar aqui que a análise possui poucos dados, o que acaba causando grande variância na estimação das notas ao longo do tempo. Considerando que a quantidade de produções originais aumentou rapidamente nos últimos 4 anos, a tendência de queda vista em diversos gêneros indica que a Netflix deu preferência por trazer filmes já bem-recebidos nos seus primeiros anos de expansão, de modo a atrair o público. Em comparação com o gráfico de quantidade, a 'separação' dos gêneros ocorre em torno de 2016, muito antes da estabilização das notas, que se dá em torno de 2017-2018. Com isso, não há (aparentemente) uma correlação direta entre a quantidade e a qualidade do catálogo gênero-a-gênero. Ainda assim, vemos que o gênero das docuséries, que apresenta quantidade abaixo da média, tem visto um aumento na nota média dos lançamentos, logo seria interessante testar a força da análise apresentada aqui caso essa tendência se reduza/reverta durante os próximos anos.
+
+# Referências
+
+Dataset da Netflix
+
+https://www.kaggle.com/shivamb/netflix-shows
+
+Datasets do IMDb
+
+https://datasets.imdbws.com/
+
+Livro: 
+R for Data Science - Hadley Wickham & Garrett Grolemund
+
+e muitas discussões do Stack Exchange. Deixo aqui as que são utilizadas no trabalho final:
+
+Remoção de colunas redundantes
+https://stackoverflow.com/questions/37072844/select-subset-of-columns-based-on-vector-r
+
+Base dos ggplots utilizando melt
+https://stackoverflow.com/questions/4877357/how-to-plot-all-the-columns-of-a-data-frame-in-r
+
+Formatação das escalas dos gráficos
+https://stackoverflow.com/questions/11748384/formatting-dates-on-x-axis-in-ggplot2
+
+Highlight para o último gráfico utilizando plotly
+https://stackoverflow.com/questions/52532428/highlight-all-values-from-a-group-on-hover
